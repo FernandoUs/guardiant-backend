@@ -1,0 +1,11 @@
+node_modules/
+lib/
+*.log
+.env
+
+# Firebase
+.firebase/
+firebase-debug.log
+firestore-debug.log
+ui-debug.log
+*.jar
