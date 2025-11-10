@@ -1,9 +1,8 @@
-import { db} from './firestore';
+import { db } from './firestore';
 import * as bcrypt from 'bcryptjs';
-// Importamos Timestamp y FieldValue directamente de la librería de admin
 import { Timestamp, FieldValue } from 'firebase-admin/firestore';
+import AlertsService from './alerts'; // <-- Importamos el servicio de alertas
 
-// Interfaces
 interface PinConfiguration {
   normalPinHash: string;
   securityPinHash: string;
@@ -14,7 +13,7 @@ interface PinConfiguration {
 interface AppConfiguration {
   packageName: string;
   appName: string;
-  icon?: string | null; // Aceptamos null también
+  icon?: string | null; // Acepta null
   isProtected: boolean;
   addedAt: Timestamp;
 }
@@ -32,7 +31,6 @@ interface UserConfiguration {
   lastUpdated: Timestamp;
 }
 
-
 export class ConfigService {
   
   /**
@@ -44,30 +42,18 @@ export class ConfigService {
     securityPin: string
   ): Promise<{ success: boolean; message: string }> {
     try {
-      // Validaciones
+      // Validaciones (longitud, diferencia, solo números)
       if (!normalPin || !securityPin) {
-        return {
-          success: false,
-          message: 'Ambos PINs son requeridos'
-        };
+        return { success: false, message: 'Ambos PINs son requeridos' };
       }
       if (normalPin.length < 4 || normalPin.length > 6) {
-        return {
-          success: false,
-          message: 'El PIN debe tener entre 4 y 6 dígitos'
-        };
+        return { success: false, message: 'El PIN debe tener entre 4 y 6 dígitos' };
       }
       if (normalPin === securityPin) {
-        return {
-          success: false,
-          message: 'Los PINs deben ser diferentes'
-        };
+        return { success: false, message: 'Los PINs deben ser diferentes' };
       }
       if (!/^\d+$/.test(normalPin) || !/^\d+$/.test(securityPin)) {
-        return {
-          success: false,
-          message: 'Los PINs solo deben contener números'
-        };
+        return { success: false, message: 'Los PINs solo deben contener números' };
       }
 
       // Hashear PINs
@@ -85,7 +71,7 @@ export class ConfigService {
           securityPinHash,
           createdAt: Timestamp.now(),
           lastUpdated: Timestamp.now()
-        });
+        }, { merge: true }); // Usar merge por si ya existe
 
       // Actualizar usuario principal
       await db
@@ -97,17 +83,11 @@ export class ConfigService {
           updatedAt: Timestamp.now()
         });
 
-      return {
-        success: true,
-        message: 'PINs guardados exitosamente'
-      };
+      return { success: true, message: 'PINs guardados exitosamente' };
 
     } catch (error) {
       console.error('Error guardando PINs:', error);
-      return {
-        success: false,
-        message: 'Error guardando configuración'
-      };
+      return { success: false, message: 'Error guardando configuración' };
     }
   }
 
@@ -131,11 +111,7 @@ export class ConfigService {
         .get();
 
       if (!pinsDoc.exists) {
-        return {
-          success: false,
-          mode: null,
-          message: 'Configuración no encontrada'
-        };
+        return { success: false, mode: null, message: 'Configuración no encontrada' };
       }
 
       const { normalPinHash, securityPinHash } = pinsDoc.data() as PinConfiguration;
@@ -144,18 +120,21 @@ export class ConfigService {
       const isNormalPin = await bcrypt.compare(pin, normalPinHash);
       if (isNormalPin) {
         await this.logUnlock(userId, 'normal');
-        
-        return {
-          success: true,
-          mode: 'normal',
-          message: 'PIN normal correcto'
-        };
+        return { success: true, mode: 'normal', message: 'PIN normal correcto' };
       }
 
       // Verificar PIN de seguridad
       const isSecurityPin = await bcrypt.compare(pin, securityPinHash);
       if (isSecurityPin) {
-        await this.activateSecurityMode(userId);
+        
+        // ---- LÓGICA DE ALERTA CENTRALIZADA ----
+        // Llamamos al servicio de Alertas
+        await AlertsService.activateSecurityMode(
+          userId, 
+          'security_pin_used',
+          { pinUsed: `${pin.length} digits` } // No enviar el PIN
+        );
+        // ---- FIN LÓGICA CENTRALIZADA ----
         
         return {
           success: true,
@@ -166,20 +145,11 @@ export class ConfigService {
 
       // PIN incorrecto
       await this.logFailedAttempt(userId, pin.length);
-      
-      return {
-        success: false,
-        mode: null,
-        message: 'PIN incorrecto'
-      };
+      return { success: false, mode: null, message: 'PIN incorrecto' };
 
     } catch (error) {
       console.error('Error verificando PIN:', error);
-      return {
-        success: false,
-        mode: null,
-        message: 'Error en verificación'
-      };
+      return { success: false, mode: null, message: 'Error en verificación' };
     }
   }
 
@@ -194,10 +164,7 @@ export class ConfigService {
       const protectedApps: AppConfiguration[] = apps.map(app => ({
         packageName: app.packageName,
         appName: app.appName,
-        // =======================================================
-        // SOLUCIÓN: Si app.icon es undefined, guardamos null
-        icon: app.icon || null, 
-        // =======================================================
+        icon: app.icon || null, // <- Corregido para manejar undefined
         isProtected: true,
         addedAt: Timestamp.now()
       }));
@@ -223,17 +190,11 @@ export class ConfigService {
           updatedAt: Timestamp.now()
         });
 
-      return {
-        success: true,
-        message: `${apps.length} apps configuradas`
-      };
+      return { success: true, message: `${apps.length} apps configuradas` };
 
     } catch (error) {
       console.error('Error guardando apps:', error);
-      return {
-        success: false,
-        message: 'Error guardando apps'
-      };
+      return { success: false, message: 'Error guardando apps' };
     }
   }
 
@@ -268,20 +229,14 @@ export class ConfigService {
           updatedAt: Timestamp.now()
         });
 
-      return {
-        success: true,
-        message: 'Nivel de protección configurado'
-      };
+      return { success: true, message: 'Nivel de protección configurado' };
 
     } catch (error) {
       console.error('Error configurando protección:', error);
-      return {
-        success: false,
-        message: 'Error en configuración'
-      };
+      return { success: false, message: 'Error en configuración' };
     }
   }
-  
+
   /**
    * Obtener configuración completa del usuario
    */
@@ -301,19 +256,19 @@ export class ConfigService {
       const appsData = appsDoc.exists ? appsDoc.data() as any : { protectedApps: [] };
       const protectionData = protectionDoc.exists ? protectionDoc.data() as any : { level: 'basic' };
 
-      // Idealmente, también deberíamos traer el documento 'users' principal
-      // para obtener setupCompleted, permissionsGranted, y emergencyContacts.
-      // Por ahora, los dejamos como valores fijos/vacíos.
-      
+      // Necesitamos datos del doc principal también
+      const userDoc = await db.collection('users').doc(userId).get();
+      const userData = userDoc.data() as any;
+
       return {
         userId,
         normalPinHash: pinsData.normalPinHash,
         securityPinHash: pinsData.securityPinHash,
         protectionLevel: protectionData.level,
         protectedApps: appsData.protectedApps || [],
-        setupCompleted: true, 
-        permissionsGranted: false, 
-        emergencyContacts: [], 
+        setupCompleted: userData.setup?.completed || false,
+        permissionsGranted: userData.setup?.permissionsGranted || false,
+        emergencyContacts: userData.emergencyContacts || [],
         createdAt: pinsData.createdAt,
         lastUpdated: pinsData.lastUpdated
       };
@@ -321,38 +276,6 @@ export class ConfigService {
     } catch (error) {
       console.error('Error obteniendo configuración:', error);
       return null;
-    }
-  }
-
-  /**
-   * Activar modo seguridad (cuando se usa PIN de seguridad)
-   */
-  private static async activateSecurityMode(userId: string): Promise<void> {
-    try {
-      // Crear alerta de seguridad
-      await db
-        .collection('users')
-        .doc(userId)
-        .collection('security_alerts')
-        .add({
-          type: 'security_pin_used',
-          timestamp: Timestamp.now(),
-          status: 'active',
-          resolved: false
-        });
-
-      // Actualizar estado del usuario
-      await db
-        .collection('users')
-        .doc(userId)
-        .update({
-          currentMode: 'security',
-          'security.modeActivatedAt': Timestamp.now(),
-          'security.alertActive': true
-        });
-
-    } catch (error) {
-      console.error('Error activando modo seguridad:', error);
     }
   }
 
@@ -372,14 +295,19 @@ export class ConfigService {
         });
 
       // Incrementar contador
-      await db
-        .collection('users')
-        .doc(userId)
-        .update({
-          // Usamos FieldValue importado
-          'stats.totalUnlocks': FieldValue.increment(1),
-          'stats.lastUnlock': Timestamp.now()
-        });
+      const increment = FieldValue.increment(1);
+      const updateData: any = {
+        'stats.totalUnlocks': increment,
+        'stats.lastUnlock': Timestamp.now()
+      };
+      
+      if (mode === 'normal') {
+        updateData['stats.normalUnlocks'] = increment;
+      } else {
+        updateData['stats.securityUnlocks'] = increment;
+      }
+      
+      await db.collection('users').doc(userId).update(updateData);
 
     } catch (error) {
       console.error('Error logging unlock:', error);
@@ -417,32 +345,17 @@ export class ConfigService {
    */
   private static getProtectionFeatures(level: string): string[] {
     const features: Record<string, string[]> = {
-      basic: [
-        'block_apps',
-        'pin_protection'
-      ],
+      basic: ['block_apps', 'pin_protection'],
       camouflage: [
-        'block_apps',
-        'pin_protection',
-        'close_sessions',
-        'hide_apps',
-        'capture_evidence',
-        'gps_tracking',
-        'send_alerts'
+        'block_apps', 'pin_protection', 'close_sessions',
+        'hide_apps', 'capture_evidence', 'gps_tracking', 'send_alerts'
       ],
       extreme: [
-        'block_apps',
-        'pin_protection',
-        'close_sessions',
-        'hide_apps',
-        'capture_evidence',
-        'gps_tracking',
-        'send_alerts',
-        'delete_sensitive_data',
-        'remote_wipe'
+        'block_apps', 'pin_protection', 'close_sessions', 'hide_apps',
+        'capture_evidence', 'gps_tracking', 'send_alerts',
+        'delete_sensitive_data', 'remote_wipe'
       ]
     };
-
     return features[level] || features.basic;
   }
 }
