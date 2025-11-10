@@ -1,0 +1,10 @@
+{
+  "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "firebase-admin": "^13.6.0"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/node": "^24.10.0"
+  }
+}

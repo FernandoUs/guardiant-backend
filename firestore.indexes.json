@@ -1,4 +1,57 @@
 {
-  "indexes": [],
+  "indexes": [
+    {
+      "collectionGroup": "security_alerts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "timestamp",
+          "order": "DESCENDING"
+        },
+        {
+          "fieldPath": "resolved",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "unlock_history",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "timestamp",
+          "order": "DESCENDING"
+        },
+        {
+          "fieldPath": "mode",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "failed_attempts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "timestamp",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "evidence",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "timestamp",
+          "order": "DESCENDING"
+        },
+        {
+          "fieldPath": "type",
+          "order": "ASCENDING"
+        }
+      ]
+    }
+  ],
   "fieldOverrides": []
 }
