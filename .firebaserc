@@ -1,6 +1,7 @@
 {
   "projects": {
-    "guardiant": "guardiant-ea59f"
+    "guardiant": "guardiant-ea59f",
+    "default": "guardiant-ea59f"
   },
   "targets": {},
   "etags": {}

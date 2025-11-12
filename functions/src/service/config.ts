@@ -1,7 +1,7 @@
 import { db } from './firestore';
 import * as bcrypt from 'bcryptjs';
 import { Timestamp, FieldValue } from 'firebase-admin/firestore';
-import AlertsService from './alerts'; // <-- Importamos el servicio de alertas
+import AlertsService from './alerts';
 
 interface PinConfiguration {
   normalPinHash: string;
@@ -13,22 +13,9 @@ interface PinConfiguration {
 interface AppConfiguration {
   packageName: string;
   appName: string;
-  icon?: string | null; // Acepta null
+  icon?: string | null;
   isProtected: boolean;
   addedAt: Timestamp;
-}
-
-interface UserConfiguration {
-  userId: string;
-  normalPinHash: string;
-  securityPinHash: string;
-  protectionLevel: 'basic' | 'camouflage' | 'extreme';
-  protectedApps: AppConfiguration[];
-  setupCompleted: boolean;
-  permissionsGranted: boolean;
-  emergencyContacts: string[];
-  createdAt: Timestamp;
-  lastUpdated: Timestamp;
 }
 
 export class ConfigService {
@@ -42,7 +29,7 @@ export class ConfigService {
     securityPin: string
   ): Promise<{ success: boolean; message: string }> {
     try {
-      // Validaciones (longitud, diferencia, solo números)
+      // Validaciones
       if (!normalPin || !securityPin) {
         return { success: false, message: 'Ambos PINs son requeridos' };
       }
@@ -71,7 +58,7 @@ export class ConfigService {
           securityPinHash,
           createdAt: Timestamp.now(),
           lastUpdated: Timestamp.now()
-        }, { merge: true }); // Usar merge por si ya existe
+        }, { merge: true });
 
       // Actualizar usuario principal
       await db
@@ -127,14 +114,12 @@ export class ConfigService {
       const isSecurityPin = await bcrypt.compare(pin, securityPinHash);
       if (isSecurityPin) {
         
-        // ---- LÓGICA DE ALERTA CENTRALIZADA ----
-        // Llamamos al servicio de Alertas
+        // Activar modo seguridad
         await AlertsService.activateSecurityMode(
           userId, 
           'security_pin_used',
-          { pinUsed: `${pin.length} digits` } // No enviar el PIN
+          { pinUsed: `${pin.length} digits` }
         );
-        // ---- FIN LÓGICA CENTRALIZADA ----
         
         return {
           success: true,
@@ -164,7 +149,7 @@ export class ConfigService {
       const protectedApps: AppConfiguration[] = apps.map(app => ({
         packageName: app.packageName,
         appName: app.appName,
-        icon: app.icon || null, // <- Corregido para manejar undefined
+        icon: app.icon || null,
         isProtected: true,
         addedAt: Timestamp.now()
       }));
@@ -180,12 +165,14 @@ export class ConfigService {
           lastUpdated: Timestamp.now()
         });
 
-      // Actualizar progreso de setup
+      // Marcar setup como completo (ya no hay paso de "protectionLevel")
       await db
         .collection('users')
         .doc(userId)
         .update({
           'setup.appsConfigured': true,
+          'setup.completed': true, // ← Ya completamos todo
+          'setup.completedAt': Timestamp.now(),
           'setup.lastStep': 'apps',
           updatedAt: Timestamp.now()
         });
@@ -199,31 +186,32 @@ export class ConfigService {
   }
 
   /**
-   * Configurar nivel de protección
+   * Configurar nivel de protección (y finalizar setup)
    */
   static async setProtectionLevel(
     userId: string,
-    level: 'basic' | 'camouflage' | 'extreme'
+    level: string
   ): Promise<{ success: boolean; message: string }> {
     try {
+      // 1. Guardar la configuración de nivel (aunque sea fija)
       await db
         .collection('users')
         .doc(userId)
         .collection('config')
         .doc('protection')
         .set({
-          level,
-          features: this.getProtectionFeatures(level),
+          level: level, // "extreme"
           configuredAt: Timestamp.now()
-        });
+        }, { merge: true });
 
-      // Marcar setup como completo
+      // 2. Marcar el setup principal como COMPLETO
+      // (Esta es la parte que evita el bucle)
       await db
         .collection('users')
         .doc(userId)
         .update({
-          'setup.protectionConfigured': true,
-          'setup.completed': true,
+          'setup.protectionConfigured': true, // <-- Marca este paso
+          'setup.completed': true,            // <-- ¡Marca todo como completo!
           'setup.lastStep': 'protection',
           'setup.completedAt': Timestamp.now(),
           updatedAt: Timestamp.now()
@@ -236,16 +224,15 @@ export class ConfigService {
       return { success: false, message: 'Error en configuración' };
     }
   }
-
   /**
    * Obtener configuración completa del usuario
    */
-  static async getUserConfig(userId: string): Promise<UserConfiguration | null> {
+  static async getUserConfig(userId: string) {
     try {
-      const [pinsDoc, appsDoc, protectionDoc] = await Promise.all([
+      const [pinsDoc, appsDoc, userDoc] = await Promise.all([
         db.collection('users').doc(userId).collection('config').doc('pins').get(),
         db.collection('users').doc(userId).collection('config').doc('apps').get(),
-        db.collection('users').doc(userId).collection('config').doc('protection').get()
+        db.collection('users').doc(userId).get()
       ]);
 
       if (!pinsDoc.exists) {
@@ -254,17 +241,12 @@ export class ConfigService {
 
       const pinsData = pinsDoc.data() as any;
       const appsData = appsDoc.exists ? appsDoc.data() as any : { protectedApps: [] };
-      const protectionData = protectionDoc.exists ? protectionDoc.data() as any : { level: 'basic' };
-
-      // Necesitamos datos del doc principal también
-      const userDoc = await db.collection('users').doc(userId).get();
       const userData = userDoc.data() as any;
 
       return {
         userId,
         normalPinHash: pinsData.normalPinHash,
         securityPinHash: pinsData.securityPinHash,
-        protectionLevel: protectionData.level,
         protectedApps: appsData.protectedApps || [],
         setupCompleted: userData.setup?.completed || false,
         permissionsGranted: userData.setup?.permissionsGranted || false,
@@ -294,7 +276,6 @@ export class ConfigService {
           success: true
         });
 
-      // Incrementar contador
       const increment = FieldValue.increment(1);
       const updateData: any = {
         'stats.totalUnlocks': increment,
@@ -338,25 +319,6 @@ export class ConfigService {
     } catch (error) {
       console.error('Error logging failed attempt:', error);
     }
-  }
-
-  /**
-   * Obtener features según nivel de protección
-   */
-  private static getProtectionFeatures(level: string): string[] {
-    const features: Record<string, string[]> = {
-      basic: ['block_apps', 'pin_protection'],
-      camouflage: [
-        'block_apps', 'pin_protection', 'close_sessions',
-        'hide_apps', 'capture_evidence', 'gps_tracking', 'send_alerts'
-      ],
-      extreme: [
-        'block_apps', 'pin_protection', 'close_sessions', 'hide_apps',
-        'capture_evidence', 'gps_tracking', 'send_alerts',
-        'delete_sensitive_data', 'remote_wipe'
-      ]
-    };
-    return features[level] || features.basic;
   }
 }
 

@@ -5,7 +5,7 @@ import * as admin from 'firebase-admin';
 import AuthService from './service/auth';
 import ConfigService from './service/config';
 import UsersService from './service/users';
-import AlertsService from './service/alerts'; // <-- NUEVO SERVICIO
+import AlertsService from './service/alerts';
 import { HttpsError } from 'firebase-functions/v1/https';
 
 // ============================================
@@ -36,12 +36,11 @@ export const onUserCreate = functions.auth.user().onCreate(async (user) => {
       createdAt: admin.firestore.Timestamp.now(),
       updatedAt: admin.firestore.Timestamp.now(),
       
-      // Setup progress
+      // Setup progress (solo 2 pasos: PINs y Apps)
       setup: {
         completed: false,
         pinsConfigured: false,
         appsConfigured: false,
-        protectionConfigured: false,
         permissionsGranted: false,
         lastStep: null,
         startedAt: admin.firestore.Timestamp.now(),
@@ -65,6 +64,9 @@ export const onUserCreate = functions.auth.user().onCreate(async (user) => {
         lastSecurityPinUse: null
       },
       
+      // FCM token para notificaciones push
+      fcmToken: null,
+      
       // Account status
       status: 'active',
       emailVerified: user.emailVerified
@@ -84,7 +86,10 @@ export const onUserDelete = functions.auth.user().onDelete(async (user) => {
     const db = admin.firestore();
     const batch = db.batch();
     batch.delete(db.collection('users').doc(user.uid));
-    // NOTA: Las subcolecciones quedan huérfanas. Se necesita una función recursiva.
+    
+    // TODO: Implementar borrado recursivo de subcolecciones
+    // (config, unlock_history, failed_attempts, security_alerts)
+    
     await batch.commit();
     console.log('✅ Documento de usuario eliminado:', user.uid);
   } catch (error) {
@@ -98,7 +103,7 @@ export const onUserDelete = functions.auth.user().onDelete(async (user) => {
 // ============================================
 
 /**
- * API: Registrar usuario (para pruebas)
+ * API: Registrar usuario
  */
 export const registerUser = functions.https.onCall(async (data, context) => {
   const { email, password, displayName } = data;
@@ -127,8 +132,7 @@ export const savePins = functions.https.onCall(async (data, context) => {
     throw new HttpsError('invalid-argument', 'Ambos PINs son requeridos');
   }
   try {
-    const result = await ConfigService.savePins(userId, normalPin, securityPin);
-    return result;
+    return await ConfigService.savePins(userId, normalPin, securityPin);
   } catch (error: any) {
     console.error('❌ Error en savePins:', error);
     if (error instanceof HttpsError) throw error;
@@ -156,6 +160,7 @@ export const verifyPin = functions.https.onCall(async (data, context) => {
 
 /**
  * API: Guardar apps protegidas
+ * Este endpoint ahora marca el setup como completo
  */
 export const saveProtectedApps = functions.https.onCall(async (data, context) => {
   const userId = checkAuth(context);
@@ -164,8 +169,7 @@ export const saveProtectedApps = functions.https.onCall(async (data, context) =>
     throw new HttpsError('invalid-argument', 'Apps debe ser un array con al menos 1 app');
   }
   try {
-    const result = await ConfigService.saveProtectedApps(userId, apps);
-    return result;
+    return await ConfigService.saveProtectedApps(userId, apps);
   } catch (error: any) {
     console.error('❌ Error en saveProtectedApps:', error);
     if (error instanceof HttpsError) throw error;
@@ -173,25 +177,30 @@ export const saveProtectedApps = functions.https.onCall(async (data, context) =>
   }
 });
 
+// --- ¡PEGA EL NUEVO CÓDIGO AQUÍ! ---
+// (Justo después de la función saveProtectedApps)
+
 /**
- * API: Configurar nivel de protección
+ * API: Finalizar setup y fijar nivel de protección
+ * (Esta era la función que faltaba)
  */
 export const setProtectionLevel = functions.https.onCall(async (data, context) => {
   const userId = checkAuth(context);
-  const { level } = data;
-  const validLevels = ['basic', 'camouflage', 'extreme'];
-  if (!validLevels.includes(level)) {
-    throw new HttpsError('invalid-argument', `Nivel de protección inválido.`);
-  }
+  
+  // ¡LA CORRECCIÓN!
+  // No leemos 'data.level'. Usamos el nivel fijo que acordamos.
+  const fixedLevel = "extreme"; 
+  
   try {
-    const result = await ConfigService.setProtectionLevel(userId, level);
-    return result;
+    // Llamamos al servicio de config con el nivel fijo
+    return await ConfigService.setProtectionLevel(userId, fixedLevel);
   } catch (error: any) {
     console.error('❌ Error en setProtectionLevel:', error);
     if (error instanceof HttpsError) throw error;
     throw new HttpsError('internal', error.message);
   }
 });
+// --- FIN DEL CÓDIGO NUEVO ---
 
 /**
  * API: Obtener configuración del usuario
@@ -203,6 +212,7 @@ export const getUserConfig = functions.https.onCall(async (data, context) => {
     if (!config) {
       throw new HttpsError('not-found', 'Configuración no encontrada.');
     }
+    // No enviar los hashes de PINs al cliente
     const { normalPinHash, securityPinHash, ...safeConfig } = config;
     return { success: true, data: safeConfig };
   } catch (error: any) {
@@ -226,8 +236,7 @@ export const changePins = functions.https.onCall(async (data, context) => {
     if (!verifyResult.success) {
       throw new HttpsError('permission-denied', 'PIN actual incorrecto');
     }
-    const result = await ConfigService.savePins(userId, newNormalPin, newSecurityPin);
-    return result;
+    return await ConfigService.savePins(userId, newNormalPin, newSecurityPin);
   } catch (error: any) {
     console.error('❌ Error en changePins:', error);
     if (error instanceof HttpsError) throw error;
@@ -316,14 +325,14 @@ export const logSecurityEvent = functions.https.onCall(async (data, context) => 
 
 
 // ============================================
-// NUEVOS ENDPOINTS PARA EL PANEL WEB
+// SECURITY ALERTS APIs (Panel Web)
 // ============================================
 
 /**
  * API: Desactivar modo seguridad (Falsa Alarma)
  */
 export const deactivateSecurityMode = functions.https.onCall(async (data, context) => {
-  const userId = checkAuth(context); // El dueño debe estar logueado en el panel web
+  const userId = checkAuth(context);
   const { alertId } = data;
   if (!alertId) {
     throw new HttpsError('invalid-argument', 'alertId es requerido');
@@ -338,7 +347,7 @@ export const deactivateSecurityMode = functions.https.onCall(async (data, contex
 });
 
 /**
- * API: [Marcador] Bloqueo Remoto
+ * API: Bloqueo Remoto del Dispositivo
  */
 export const remoteLockDevice = functions.https.onCall(async (data, context) => {
   const userId = checkAuth(context);
@@ -356,7 +365,7 @@ export const remoteLockDevice = functions.https.onCall(async (data, context) => 
 });
 
 /**
- * API: [Marcador] Borrado Remoto
+ * API: Borrado Remoto de Datos
  */
 export const remoteWipeData = functions.https.onCall(async (data, context) => {
   const userId = checkAuth(context);
@@ -368,6 +377,63 @@ export const remoteWipeData = functions.https.onCall(async (data, context) => {
     return await AlertsService.remoteWipeData(userId, alertId);
   } catch (error: any) {
     console.error('❌ Error en remoteWipeData:', error);
+    if (error instanceof HttpsError) throw error;
+    throw new HttpsError('internal', error.message);
+  }
+});
+
+/**
+ * API: Actualizar FCM Token (llamado desde la app móvil)
+ */
+export const updateFCMToken = functions.https.onCall(async (data, context) => {
+  const userId = checkAuth(context);
+  const { token } = data;
+  if (!token) {
+    throw new HttpsError('invalid-argument', 'FCM token es requerido');
+  }
+  try {
+    await admin.firestore().collection('users').doc(userId).update({
+      fcmToken: token,
+      fcmTokenUpdatedAt: admin.firestore.Timestamp.now()
+    });
+    return { success: true, message: 'FCM token actualizado' };
+  } catch (error: any) {
+    console.error('❌ Error en updateFCMToken:', error);
+    throw new HttpsError('internal', error.message);
+  }
+});
+
+
+// ============================================
+// TRIGGER: Detección de Movimiento Brusco
+// ============================================
+
+/**
+ * API: Reportar movimiento brusco desde la app móvil
+ * La app Android llama a esto cuando el acelerómetro detecta sacudida
+ */
+export const reportAbruptMovement = functions.https.onCall(async (data, context) => {
+  const userId = checkAuth(context);
+  const { intensity, location } = data;
+  
+  try {
+    // Activar modo seguridad automáticamente
+    await AlertsService.activateSecurityMode(
+      userId,
+      'abrupt_movement',
+      {
+        intensity: intensity || 'unknown',
+        location: location || null,
+        detectedAt: admin.firestore.Timestamp.now()
+      }
+    );
+    
+    return {
+      success: true,
+      message: 'Movimiento brusco registrado - Modo seguridad activado'
+    };
+  } catch (error: any) {
+    console.error('❌ Error en reportAbruptMovement:', error);
     if (error instanceof HttpsError) throw error;
     throw new HttpsError('internal', error.message);
   }
