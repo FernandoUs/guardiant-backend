@@ -2,17 +2,68 @@ rules_version = '2';
 
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Allow authenticated users to read/write their own data
+    
+    // ============================================
+    // USUARIOS - Solo el propietario puede acceder
+    // ============================================
     match /users/{userId} {
       allow read, write: if request.auth != null && request.auth.uid == userId;
+      
+      // Subccolecciones del usuario (config, alerts, etc.)
+      match /{document=**} {
+        allow read, write: if request.auth != null && request.auth.uid == userId;
+      }
     }
-    
-    // Allow authenticated users to read/write alerts
-    match /alerts/{alertId} {
-      allow read, write: if request.auth != null;
+
+    // ============================================
+    // ALERTAS DE SEGURIDAD - Propietario + Backend
+    // ============================================
+    match /security_alerts/{alertId} {
+      // Solo el propietario puede leer sus alertas
+      allow read: if request.auth != null && request.auth.uid == resource.data.userId;
+      
+      // Las funciones del backend pueden crear alertas
+      allow create: if request.auth != null;
+      
+      // Solo el propietario puede actualizar/eliminar
+      allow update, delete: if request.auth != null && request.auth.uid == resource.data.userId;
     }
-    
-    // Default: deny all other access
+
+    // ============================================
+    // EVENTOS DE SEGURIDAD - Similar a alertas
+    // ============================================
+    match /security_events/{eventId} {
+      allow read: if request.auth != null && request.auth.uid == resource.data.userId;
+      allow create, write: if request.auth != null;
+    }
+
+    // ============================================
+    // HISTORIAL DE DESBLOQUEOS (Privado del usuario)
+    // ============================================
+    match /users/{userId}/unlock_history/{doc} {
+      allow read: if request.auth != null && request.auth.uid == userId;
+      allow write: if request.auth != null && request.auth.uid == userId;
+    }
+
+    // ============================================
+    // INTENTOS FALLIDOS (Privado del usuario)
+    // ============================================
+    match /users/{userId}/failed_attempts/{doc} {
+      allow read: if request.auth != null && request.auth.uid == userId;
+      allow write: if request.auth != null && request.auth.uid == userId;
+    }
+
+    // ============================================
+    // CONFIGURACIÓN (PINs, Apps, Protección)
+    // ============================================
+    match /users/{userId}/config/{doc} {
+      allow read: if request.auth != null && request.auth.uid == userId;
+      allow write: if request.auth != null && request.auth.uid == userId;
+    }
+
+    // ============================================
+    // DEFAULT: Denegar todo lo demás
+    // ============================================
     match /{document=**} {
       allow read, write: if false;
     }
