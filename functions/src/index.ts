@@ -1,457 +1,215 @@
 import * as functions from 'firebase-functions';
-import * as admin from 'firebase-admin';
-
-// Importar servicios
-import AuthService from './service/auth';
+import AlertsService from './service/alerts';
 import ConfigService from './service/config';
 import UsersService from './service/users';
-import AlertsService from './service/alerts';
-import { HttpsError } from 'firebase-functions/v1/https';
+import AuthService from './service/auth';
 
 // ============================================
-// HELPER: Validar autenticación
+// AUTH ENDPOINTS
 // ============================================
-const checkAuth = (context: functions.https.CallableContext): string => {
-  if (!context.auth) {
-    throw new HttpsError('unauthenticated', 'Usuario no autenticado');
-  }
-  return context.auth.uid;
-};
-
-
-// ============================================
-// AUTHENTICATION TRIGGERS
-// ============================================
-
-/**
- * Trigger: Crear documento de usuario al registrarse
- */
-export const onUserCreate = functions.auth.user().onCreate(async (user) => {
-  try {
-    await admin.firestore().collection('users').doc(user.uid).set({
-      email: user.email,
-      displayName: user.displayName || null,
-      photoURL: user.photoURL || null,
-      phoneNumber: user.phoneNumber || null,
-      createdAt: admin.firestore.Timestamp.now(),
-      updatedAt: admin.firestore.Timestamp.now(),
-      
-      // Setup progress (solo 2 pasos: PINs y Apps)
-      setup: {
-        completed: false,
-        pinsConfigured: false,
-        appsConfigured: false,
-        permissionsGranted: false,
-        lastStep: null,
-        startedAt: admin.firestore.Timestamp.now(),
-        completedAt: null
-      },
-      
-      // Stats
-      stats: {
-        totalUnlocks: 0,
-        failedAttempts: 0,
-        lastUnlock: null,
-        normalUnlocks: 0,
-        securityUnlocks: 0
-      },
-      
-      // Security state
-      currentMode: 'normal',
-      security: {
-        alertActive: false,
-        modeActivatedAt: null,
-        lastSecurityPinUse: null
-      },
-      
-      // FCM token para notificaciones push
-      fcmToken: null,
-      
-      // Account status
-      status: 'active',
-      emailVerified: user.emailVerified
-    });
-
-    console.log('✅ Usuario creado en Firestore:', user.uid);
-  } catch (error) {
-    console.error('❌ Error creando documento de usuario:', error);
-  }
-});
-
-/**
- * Trigger: Limpiar datos cuando se elimina un usuario
- */
-export const onUserDelete = functions.auth.user().onDelete(async (user) => {
-  try {
-    const db = admin.firestore();
-    const batch = db.batch();
-    batch.delete(db.collection('users').doc(user.uid));
-    
-    // TODO: Implementar borrado recursivo de subcolecciones
-    // (config, unlock_history, failed_attempts, security_alerts)
-    
-    await batch.commit();
-    console.log('✅ Documento de usuario eliminado:', user.uid);
-  } catch (error) {
-    console.error('❌ Error eliminando datos de usuario:', error);
-  }
-});
-
-
-// ============================================
-// AUTHENTICATION APIs
-// ============================================
-
-/**
- * API: Registrar usuario
- */
 export const registerUser = functions.https.onCall(async (data, context) => {
-  const { email, password, displayName } = data;
-  if (!email || !password) {
-    throw new HttpsError('invalid-argument', 'Email y contraseña son requeridos');
-  }
-  try {
-    return await AuthService.registerUser(email, password, displayName);
-  } catch (error: any) {
-    throw error;
-  }
+    const { email, password, displayName } = data;
+    try {
+        return await AuthService.registerUser(email, password, displayName);
+    } catch (error: any) {
+        return { success: false, message: error.message };
+    }
 });
 
-
 // ============================================
-// CONFIGURATION APIs
+// CONFIG ENDPOINTS (Setup inicial)
 // ============================================
-
-/**
- * API: Guardar PINs (Normal y Seguridad)
- */
 export const savePins = functions.https.onCall(async (data, context) => {
-  const userId = checkAuth(context);
-  const { normalPin, securityPin } = data;
-  if (!normalPin || !securityPin) {
-    throw new HttpsError('invalid-argument', 'Ambos PINs son requeridos');
-  }
-  try {
-    return await ConfigService.savePins(userId, normalPin, securityPin);
-  } catch (error: any) {
-    console.error('❌ Error en savePins:', error);
-    if (error instanceof HttpsError) throw error;
-    throw new HttpsError('internal', error.message);
-  }
+    const uid = context.auth?.uid;
+    if (!uid) throw new Error('No autenticado');
+    
+    const { normalPin, securityPin } = data;
+    return await ConfigService.savePins(uid, normalPin, securityPin);
 });
 
-/**
- * API: Verificar PIN (para desbloqueo)
- */
-export const verifyPin = functions.https.onCall(async (data, context) => {
-  const userId = checkAuth(context);
-  const { pin } = data;
-  if (!pin) {
-    throw new HttpsError('invalid-argument', 'PIN es requerido');
-  }
-  try {
-    return await ConfigService.verifyPin(userId, pin);
-  } catch (error: any) {
-    console.error('❌ Error en verifyPin:', error);
-    if (error instanceof HttpsError) throw error;
-    throw new HttpsError('internal', error.message);
-  }
-});
-
-/**
- * API: Guardar apps protegidas
- * Este endpoint ahora marca el setup como completo
- */
 export const saveProtectedApps = functions.https.onCall(async (data, context) => {
-  const userId = checkAuth(context);
-  const { apps } = data;
-  if (!Array.isArray(apps) || apps.length === 0) {
-    throw new HttpsError('invalid-argument', 'Apps debe ser un array con al menos 1 app');
-  }
-  try {
-    return await ConfigService.saveProtectedApps(userId, apps);
-  } catch (error: any) {
-    console.error('❌ Error en saveProtectedApps:', error);
-    if (error instanceof HttpsError) throw error;
-    throw new HttpsError('internal', error.message);
-  }
+    const uid = context.auth?.uid;
+    if (!uid) throw new Error('No autenticado');
+    
+    const { apps } = data;
+    return await ConfigService.saveProtectedApps(uid, apps);
 });
 
-// --- ¡PEGA EL NUEVO CÓDIGO AQUÍ! ---
-// (Justo después de la función saveProtectedApps)
-
-/**
- * API: Finalizar setup y fijar nivel de protección
- * (Esta era la función que faltaba)
- */
-export const setProtectionLevel = functions.https.onCall(async (data, context) => {
-  const userId = checkAuth(context);
-  
-  // ¡LA CORRECCIÓN!
-  // No leemos 'data.level'. Usamos el nivel fijo que acordamos.
-  const fixedLevel = "extreme"; 
-  
-  try {
-    // Llamamos al servicio de config con el nivel fijo
-    return await ConfigService.setProtectionLevel(userId, fixedLevel);
-  } catch (error: any) {
-    console.error('❌ Error en setProtectionLevel:', error);
-    if (error instanceof HttpsError) throw error;
-    throw new HttpsError('internal', error.message);
-  }
+export const verifyPin = functions.https.onCall(async (data, context) => {
+    const uid = context.auth?.uid;
+    if (!uid) throw new Error('No autenticado');
+    
+    const { pin } = data;
+    return await ConfigService.verifyPin(uid, pin);
 });
-// --- FIN DEL CÓDIGO NUEVO ---
-
-/**
- * API: Obtener configuración del usuario
- */
-export const getUserConfig = functions.https.onCall(async (data, context) => {
-  const userId = checkAuth(context);
-  try {
-    const config = await ConfigService.getUserConfig(userId);
-    if (!config) {
-      throw new HttpsError('not-found', 'Configuración no encontrada.');
-    }
-    // No enviar los hashes de PINs al cliente
-    const { normalPinHash, securityPinHash, ...safeConfig } = config;
-    return { success: true, data: safeConfig };
-  } catch (error: any) {
-    console.error('❌ Error en getUserConfig:', error);
-    if (error instanceof HttpsError) throw error;
-    throw new HttpsError('internal', error.message);
-  }
-});
-
-/**
- * API: Cambiar PINs
- */
-export const changePins = functions.https.onCall(async (data, context) => {
-  const userId = checkAuth(context);
-  const { currentPin, newNormalPin, newSecurityPin } = data;
-  if (!currentPin || !newNormalPin || !newSecurityPin) {
-    throw new HttpsError('invalid-argument', 'Todos los PINs son requeridos');
-  }
-  try {
-    const verifyResult = await ConfigService.verifyPin(userId, currentPin);
-    if (!verifyResult.success) {
-      throw new HttpsError('permission-denied', 'PIN actual incorrecto');
-    }
-    return await ConfigService.savePins(userId, newNormalPin, newSecurityPin);
-  } catch (error: any) {
-    console.error('❌ Error en changePins:', error);
-    if (error instanceof HttpsError) throw error;
-    throw new HttpsError('internal', error.message);
-  }
-});
-
 
 // ============================================
-// USER PROFILE APIs
+// SECURITY EVENTS (Lo nuevo - Sensores)
 // ============================================
 
 /**
- * API: Obtener estado del setup
+ * ENDPOINT CRÍTICO: Se llama cuando hay movimiento anormal
+ * (Acelerómetro > threshold)
  */
-export const getSetupStatus = functions.https.onCall(async (data, context) => {
-  const userId = checkAuth(context);
-  try {
-    return await UsersService.getSetupStatus(userId);
-  } catch (error: any) {
-    console.error('❌ Error en getSetupStatus:', error);
-    if (error instanceof HttpsError) throw error;
-    throw new HttpsError('internal', error.message);
-  }
+export const reportAbnormalMovement = functions.https.onCall(async (data, context) => {
+    const uid = context.auth?.uid;
+    if (!uid) throw new Error('No autenticado');
+
+    const { latitude, longitude, accelerationValue } = data;
+
+    console.log(`🚨 Movimiento anormal reportado por ${uid}`);
+    console.log(`   Aceleración: ${accelerationValue}m/s²`);
+    console.log(`   Ubicación: ${latitude}, ${longitude}`);
+
+    // Activar modo seguridad
+    return await AlertsService.activateSecurityMode(
+        uid,
+        'abrupt_movement',
+        {
+            latitude,
+            longitude,
+            accelerationValue,
+            timestamp: Date.now()
+        }
+    );
 });
 
 /**
- * API: Actualizar perfil de usuario
+ * ENDPOINT CRÍTICO: Se llama cuando hay velocidad imposible
+ * (GPS > 100m en 5 segundos)
  */
-export const updateUserProfile = functions.https.onCall(async (data, context) => {
-  const userId = checkAuth(context);
-  try {
-    return await UsersService.updateUserProfile(userId, data);
-  } catch (error: any) {
-    console.error('❌ Error en updateUserProfile:', error);
-    if (error instanceof HttpsError) throw error;
-    throw new HttpsError('internal', error.message);
-  }
+export const reportSuspiciousSpeed = functions.https.onCall(async (data, context) => {
+    const uid = context.auth?.uid;
+    if (!uid) throw new Error('No autenticado');
+
+    const { latitude, longitude, calculatedSpeed } = data;
+
+    console.log(`🚨 Velocidad imposible reportada por ${uid}`);
+    console.log(`   Velocidad: ${calculatedSpeed}m/s`);
+    console.log(`   Ubicación: ${latitude}, ${longitude}`);
+
+    // Activar modo seguridad
+    return await AlertsService.activateSecurityMode(
+        uid,
+        'suspicious_speed',
+        {
+            latitude,
+            longitude,
+            calculatedSpeed,
+            timestamp: Date.now()
+        }
+    );
 });
 
 /**
- * API: Obtener feed de actividad (desbloqueos, intentos)
+ * ENDPOINT: Botón de pánico presionado
  */
-export const getActivityFeed = functions.https.onCall(async (data, context) => {
-  const userId = checkAuth(context);
-  try {
-    return await UsersService.getActivityFeed(userId);
-  } catch (error: any) {
-    console.error('❌ Error en getActivityFeed:', error);
-    if (error instanceof HttpsError) throw error;
-    throw new HttpsError('internal', error.message);
-  }
-});
+export const triggerPanicButton = functions.https.onCall(async (data, context) => {
+    const uid = context.auth?.uid;
+    if (!uid) throw new Error('No autenticado');
 
-/**
- * API: Obtener alertas de seguridad
- */
-export const getSecurityAlerts = functions.https.onCall(async (data, context) => {
-  const userId = checkAuth(context);
-  try {
-    return await UsersService.getSecurityAlerts(userId);
-  } catch (error: any) {
-    console.error('❌ Error en getSecurityAlerts:', error);
-    if (error instanceof HttpsError) throw error;
-    throw new HttpsError('internal', error.message);
-  }
-});
+    const { latitude, longitude } = data;
 
-/**
- * API: Registrar un evento de seguridad (ej. fallo de huella, GPS)
- */
-export const logSecurityEvent = functions.https.onCall(async (data, context) => {
-  const userId = checkAuth(context);
-  const { eventType, details } = data;
-  if (!eventType) {
-    throw new HttpsError('invalid-argument', 'eventType es requerido');
-  }
-  try {
-    return await UsersService.logSecurityEvent(userId, eventType, details);
-  } catch (error: any) {
-    console.error('❌ Error en logSecurityEvent:', error);
-    if (error instanceof HttpsError) throw error;
-    throw new HttpsError('internal', error.message);
-  }
-});
+    console.log(`🚨 BOTÓN DE PÁNICO PRESIONADO por ${uid}`);
 
+    return await AlertsService.activateSecurityMode(
+        uid,
+        'panic_button',
+        {
+            latitude,
+            longitude,
+            timestamp: Date.now()
+        }
+    );
+});
 
 // ============================================
-// SECURITY ALERTS APIs (Panel Web)
+// ALERTS ENDPOINTS (Control remoto)
 // ============================================
 
 /**
- * API: Desactivar modo seguridad (Falsa Alarma)
+ * Bloquear dispositivo remotamente
+ */
+export const lockDeviceRemotely = functions.https.onCall(async (data, context) => {
+    const uid = context.auth?.uid;
+    if (!uid) throw new Error('No autenticado');
+
+    const { alertId } = data;
+    return await AlertsService.remoteLockDevice(uid, alertId);
+});
+
+/**
+ * Borrar datos del dispositivo
+ */
+export const wipeDeviceRemotely = functions.https.onCall(async (data, context) => {
+    const uid = context.auth?.uid;
+    if (!uid) throw new Error('No autenticado');
+
+    const { alertId } = data;
+    return await AlertsService.remoteWipeData(uid, alertId);
+});
+
+/**
+ * Desactivar modo seguridad (Falsa alarma)
  */
 export const deactivateSecurityMode = functions.https.onCall(async (data, context) => {
-  const userId = checkAuth(context);
-  const { alertId } = data;
-  if (!alertId) {
-    throw new HttpsError('invalid-argument', 'alertId es requerido');
-  }
-  try {
-    return await AlertsService.deactivateSecurityMode(userId, alertId);
-  } catch (error: any) {
-    console.error('❌ Error en deactivateSecurityMode:', error);
-    if (error instanceof HttpsError) throw error;
-    throw new HttpsError('internal', error.message);
-  }
+    const uid = context.auth?.uid;
+    if (!uid) throw new Error('No autenticado');
+
+    const { alertId } = data;
+    return await AlertsService.deactivateSecurityMode(uid, alertId);
 });
 
 /**
- * API: Bloqueo Remoto del Dispositivo
+ * Obtener historial de alertas
  */
-export const remoteLockDevice = functions.https.onCall(async (data, context) => {
-  const userId = checkAuth(context);
-  const { alertId } = data;
-  if (!alertId) {
-    throw new HttpsError('invalid-argument', 'alertId es requerido');
-  }
-  try {
-    return await AlertsService.remoteLockDevice(userId, alertId);
-  } catch (error: any) {
-    console.error('❌ Error en remoteLockDevice:', error);
-    if (error instanceof HttpsError) throw error;
-    throw new HttpsError('internal', error.message);
-  }
-});
+export const getSecurityAlerts = functions.https.onCall(async (data, context) => {
+    const uid = context.auth?.uid;
+    if (!uid) throw new Error('No autenticado');
 
-/**
- * API: Borrado Remoto de Datos
- */
-export const remoteWipeData = functions.https.onCall(async (data, context) => {
-  const userId = checkAuth(context);
-  const { alertId } = data;
-  if (!alertId) {
-    throw new HttpsError('invalid-argument', 'alertId es requerido');
-  }
-  try {
-    return await AlertsService.remoteWipeData(userId, alertId);
-  } catch (error: any) {
-    console.error('❌ Error en remoteWipeData:', error);
-    if (error instanceof HttpsError) throw error;
-    throw new HttpsError('internal', error.message);
-  }
+    return await UsersService.getSecurityAlerts(uid);
 });
-
-/**
- * API: Actualizar FCM Token (llamado desde la app móvil)
- */
-export const updateFCMToken = functions.https.onCall(async (data, context) => {
-  const userId = checkAuth(context);
-  const { token } = data;
-  if (!token) {
-    throw new HttpsError('invalid-argument', 'FCM token es requerido');
-  }
-  try {
-    await admin.firestore().collection('users').doc(userId).update({
-      fcmToken: token,
-      fcmTokenUpdatedAt: admin.firestore.Timestamp.now()
-    });
-    return { success: true, message: 'FCM token actualizado' };
-  } catch (error: any) {
-    console.error('❌ Error en updateFCMToken:', error);
-    throw new HttpsError('internal', error.message);
-  }
-});
-
 
 // ============================================
-// TRIGGER: Detección de Movimiento Brusco
+// USERS ENDPOINTS
 // ============================================
 
-/**
- * API: Reportar movimiento brusco desde la app móvil
- * La app Android llama a esto cuando el acelerómetro detecta sacudida
- */
-export const reportAbruptMovement = functions.https.onCall(async (data, context) => {
-  const userId = checkAuth(context);
-  const { intensity, location } = data;
-  
-  try {
-    // Activar modo seguridad automáticamente
-    await AlertsService.activateSecurityMode(
-      userId,
-      'abrupt_movement',
-      {
-        intensity: intensity || 'unknown',
-        location: location || null,
-        detectedAt: admin.firestore.Timestamp.now()
-      }
-    );
-    
-    return {
-      success: true,
-      message: 'Movimiento brusco registrado - Modo seguridad activado'
-    };
-  } catch (error: any) {
-    console.error('❌ Error en reportAbruptMovement:', error);
-    if (error instanceof HttpsError) throw error;
-    throw new HttpsError('internal', error.message);
-  }
+export const getSetupStatus = functions.https.onCall(async (data, context) => {
+    const uid = context.auth?.uid;
+    if (!uid) throw new Error('No autenticado');
+
+    return await UsersService.getSetupStatus(uid);
 });
 
+export const updateUserProfile = functions.https.onCall(async (data, context) => {
+    const uid = context.auth?.uid;
+    if (!uid) throw new Error('No autenticado');
+
+    return await UsersService.updateUserProfile(uid, data);
+});
+
+export const getActivityFeed = functions.https.onCall(async (data, context) => {
+    const uid = context.auth?.uid;
+    if (!uid) throw new Error('No autenticado');
+
+    return await UsersService.getActivityFeed(uid);
+});
 
 // ============================================
-// HELPER/UTILITY APIs
+// CONFIG ENDPOINTS
 // ============================================
 
-/**
- * API: Health Check
- */
-export const healthCheck = functions.https.onRequest((req, res) => {
-  res.json({
-    status: 'ok',
-    timestamp: new Date().toISOString(),
-    service: 'guardiant-backend',
-    version: '1.0.0'
-  });
+export const setProtectionLevel = functions.https.onCall(async (data, context) => {
+    const uid = context.auth?.uid;
+    if (!uid) throw new Error('No autenticado');
+
+    const { level } = data;
+    return await ConfigService.setProtectionLevel(uid, level || 'extreme');
+});
+
+export const getUserConfig = functions.https.onCall(async (data, context) => {
+    const uid = context.auth?.uid;
+    if (!uid) throw new Error('No autenticado');
+
+    return await ConfigService.getUserConfig(uid);
 });
