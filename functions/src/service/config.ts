@@ -81,62 +81,73 @@ export class ConfigService {
   /**
    * Verificar PIN (para login en la app)
    */
+  /**
+ * Verificar PIN (para login en la app)
+ */
   static async verifyPin(
     userId: string,
-    pin: string
+    pin: string,
+    source: string = 'app' // 'app' o 'web'
   ): Promise<{ 
     success: boolean; 
     mode: 'normal' | 'security' | null;
     message: string;
   }> {
     try {
-      const pinsDoc = await db
-        .collection('users')
-        .doc(userId)
-        .collection('config')
-        .doc('pins')
-        .get();
+        const pinsDoc = await db
+            .collection('users')
+            .doc(userId)
+            .collection('config')
+            .doc('pins')
+            .get();
 
-      if (!pinsDoc.exists) {
-        return { success: false, mode: null, message: 'Configuración no encontrada' };
-      }
+        if (!pinsDoc.exists) {
+            return { success: false, mode: null, message: 'Configuración no encontrada' };
+        }
 
-      const { normalPinHash, securityPinHash } = pinsDoc.data() as PinConfiguration;
+        const { normalPinHash, securityPinHash } = pinsDoc.data() as PinConfiguration;
 
-      // Verificar PIN normal
-      const isNormalPin = await bcrypt.compare(pin, normalPinHash);
-      if (isNormalPin) {
-        await this.logUnlock(userId, 'normal');
-        return { success: true, mode: 'normal', message: 'PIN normal correcto' };
-      }
+        // Verificar PIN normal
+        const isNormalPin = await bcrypt.compare(pin, normalPinHash);
+        if (isNormalPin) {
+            // ✅ AQUÍ: Registrar fuente de desbloqueo
+            if (source === 'web') {
+                await this.logUnlock(userId, 'web');
+            } else {
+                await this.logUnlock(userId, 'normal');
+            }
+            return { success: true, mode: 'normal', message: 'PIN normal correcto' };
+        }
 
-      // Verificar PIN de seguridad
-      const isSecurityPin = await bcrypt.compare(pin, securityPinHash);
-      if (isSecurityPin) {
-        
-        // Activar modo seguridad
-        await AlertsService.activateSecurityMode(
-          userId, 
-          'security_pin_used',
-          { pinUsed: `${pin.length} digits` }
-        );
-        
-        return {
-          success: true,
-          mode: 'security',
-          message: 'PIN de seguridad correcto - Modo camuflaje activado'
-        };
-      }
+        // Verificar PIN de seguridad
+        const isSecurityPin = await bcrypt.compare(pin, securityPinHash);
+        if (isSecurityPin) {
+            
+            // Activar modo seguridad
+            await AlertsService.activateSecurityMode(
+                userId, 
+                'security_pin_used',
+                { pinUsed: `${pin.length} digits` }
+            );
+            
+            return {
+                success: true,
+                mode: 'security',
+                message: 'PIN de seguridad correcto - Modo camuflaje activado'
+            };
+        }
 
-      // PIN incorrecto
-      await this.logFailedAttempt(userId, pin.length);
-      return { success: false, mode: null, message: 'PIN incorrecto' };
+        // PIN incorrecto
+        await this.logFailedAttempt(userId, pin.length);
+        return { success: false, mode: null, message: 'PIN incorrecto' };
 
     } catch (error) {
-      console.error('Error verificando PIN:', error);
-      return { success: false, mode: null, message: 'Error en verificación' };
+        console.error('Error verificando PIN:', error);
+        return { success: false, mode: null, message: 'Error en verificación' };
     }
   }
+
+  
 
   /**
    * Guardar apps protegidas
@@ -264,34 +275,34 @@ export class ConfigService {
   /**
    * Registrar desbloqueo exitoso
    */
-  private static async logUnlock(userId: string, mode: 'normal' | 'security'): Promise<void> {
+  private static async logUnlock(userId: string, source: 'normal' | 'security' | 'web'): Promise<void> {
     try {
-      await db
-        .collection('users')
-        .doc(userId)
-        .collection('unlock_history')
-        .add({
-          mode,
-          timestamp: Timestamp.now(),
-          success: true
-        });
+        await db
+            .collection('users')
+            .doc(userId)
+            .collection('unlock_history')
+            .add({
+                source, // 'normal', 'security', o 'web'
+                timestamp: Timestamp.now(),
+                success: true
+            });
 
-      const increment = FieldValue.increment(1);
-      const updateData: any = {
-        'stats.totalUnlocks': increment,
-        'stats.lastUnlock': Timestamp.now()
-      };
-      
-      if (mode === 'normal') {
-        updateData['stats.normalUnlocks'] = increment;
-      } else {
-        updateData['stats.securityUnlocks'] = increment;
-      }
-      
-      await db.collection('users').doc(userId).update(updateData);
+        const increment = FieldValue.increment(1);
+        const updateData: any = {
+            'stats.totalUnlocks': increment,
+            'stats.lastUnlock': Timestamp.now()
+        };
+        
+        if (source === 'normal') {
+            updateData['stats.normalUnlocks'] = increment;
+        } else if (source === 'security') {
+            updateData['stats.securityUnlocks'] = increment;
+        }
+        
+        await db.collection('users').doc(userId).update(updateData);
 
     } catch (error) {
-      console.error('Error logging unlock:', error);
+        console.error('Error logging unlock:', error);
     }
   }
 

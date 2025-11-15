@@ -5,6 +5,7 @@ import ConfigService from './service/config';
 import UsersService from './service/users';
 import AuthService from './service/auth';
 import { HttpsError } from 'firebase-functions/v1/https';
+import { SmsService } from './service/sms';
 
 // ============================================
 // HELPER: Validar autenticación
@@ -494,4 +495,122 @@ export const healthCheck = functions.https.onRequest((req, res) => {
         service: 'guardiant-backend',
         version: '1.0.0'
     });
+});
+
+export const deactivateAlertOnUnlock = functions.https.onCall(async (data, context) => {
+    const uid = checkAuth(context);
+    const { alertId } = data;
+    
+    if (!alertId) {
+        throw new HttpsError('invalid-argument', 'alertId es requerido');
+    }
+    
+    try {
+        return await AlertsService.deactivateAlertOnUnlock(uid, alertId);
+    } catch (error: any) {
+        console.error('❌ Error en deactivateAlertOnUnlock:', error);
+        if (error instanceof HttpsError) throw error;
+        throw new HttpsError('internal', error.message);
+    }
+});
+
+export const sendVerificationSms = functions.https.onCall(async (data, context) => {
+    const uid = checkAuth(context);
+    const { phoneNumber } = data;
+
+    if (!phoneNumber) {
+        throw new HttpsError('invalid-argument', 'phoneNumber es requerido');
+    }
+
+    try {
+        const code = await SmsService.sendVerificationCode(phoneNumber);
+
+        // Guardar código en Firestore (con expiración de 10 minutos)
+        await admin.firestore().collection('verification_codes').doc(uid).set({
+            code,
+            phoneNumber,
+            createdAt: admin.firestore.Timestamp.now(),
+            expiresAt: admin.firestore.Timestamp.fromDate(
+                new Date(Date.now() + 10 * 60 * 1000) // 10 minutos
+            ),
+            attempts: 0
+        });
+
+        console.log(`✅ Código enviado a ${phoneNumber}`);
+
+        return {
+            success: true,
+            message: 'Código enviado al teléfono',
+            verificationId: uid // Usar el UID como verificación ID
+        };
+
+    } catch (error: any) {
+        console.error('❌ Error en sendVerificationSms:', error);
+        throw new HttpsError('internal', error.message);
+    }
+});
+
+/**
+ * Verificar código SMS
+ */
+export const verifySmscode = functions.https.onCall(async (data, context) => {
+    const uid = checkAuth(context);
+    const { code } = data;
+
+    if (!code) {
+        throw new HttpsError('invalid-argument', 'code es requerido');
+    }
+
+    try {
+        const verificationDoc = await admin.firestore()
+            .collection('verification_codes')
+            .doc(uid)
+            .get();
+
+        if (!verificationDoc.exists) {
+            throw new HttpsError('not-found', 'No se encontró código de verificación');
+        }
+
+        const verificationData = verificationDoc.data() as any;
+
+        // Verificar si expiró
+        const expiresAt = verificationData.expiresAt.toDate();
+        if (new Date() > expiresAt) {
+            throw new HttpsError('invalid-argument', 'El código ha expirado');
+        }
+
+        // Verificar intentos (máx 5)
+        if (verificationData.attempts >= 5) {
+            throw new HttpsError('permission-denied', 'Demasiados intentos fallidos');
+        }
+
+        // Verificar código
+        if (code !== verificationData.code) {
+            // Incrementar intentos
+            await verificationDoc.ref.update({
+                attempts: verificationData.attempts + 1
+            });
+            throw new HttpsError('invalid-argument', 'Código incorrecto');
+        }
+
+        // ✅ Código correcto - Marcar como verificado
+        await admin.firestore().collection('users').doc(uid).update({
+            phoneVerified: true,
+            phoneNumber: verificationData.phoneNumber,
+            verifiedAt: admin.firestore.Timestamp.now()
+        });
+
+        // Eliminar código
+        await verificationDoc.ref.delete();
+
+        return {
+            success: true,
+            message: 'Teléfono verificado exitosamente'
+        };
+
+    } catch (error: any) {
+        console.error('❌ Error en verifySmsCode:', error);
+        if (error instanceof HttpsError) throw error;
+        throw new HttpsError('internal', error.message);
+    }
 });

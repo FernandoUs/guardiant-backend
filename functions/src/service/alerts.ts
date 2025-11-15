@@ -341,6 +341,42 @@ export class AlertsService {
     };
     return messages[alertType] || 'Alerta de seguridad';
   }
+
+  /**
+ * Desactivar alerta cuando se desbloquea correctamente
+ */
+  static async deactivateAlertOnUnlock(
+    userId: string,
+    alertId: string
+  ): Promise<any> {
+    try {
+        if (!alertId) {
+            throw new HttpsError('invalid-argument', 'El ID de la alerta es requerido');
+        }
+
+        const userRef = db.collection('users').doc(userId);
+        const alertRef = userRef.collection('security_alerts').doc(alertId);
+
+        await alertRef.update({
+            resolved: true,
+            status: 'resolved',
+            resolutionType: 'unlocked_successfully',
+            resolvedAt: Timestamp.now()
+        });
+
+        console.log(`✅ Alerta ${alertId} desactivada por desbloqueo exitoso`);
+
+        return { 
+            success: true, 
+            message: 'Alerta desactivada por desbloqueo exitoso' 
+        };
+
+    } catch (error: any) {
+        console.error('Error desactivando alerta:', error);
+        if (error instanceof HttpsError) throw error;
+        throw new HttpsError('internal', error.message);
+    }
+  }
 }
 
 export default AlertsService;

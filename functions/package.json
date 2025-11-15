@@ -20,16 +20,19 @@
   "dependencies": {
     "bcryptjs": "^2.4.3",
     "firebase-admin": "^12.7.0",
-    "firebase-functions": "^4.5.0"
+    "firebase-functions": "^4.5.0",
+    "twilio": "^5.10.5"
   },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",
     "@types/node": "^24.10.0",
+    "@types/twilio": "^3.19.2",
     "@typescript-eslint/eslint-plugin": "^6.0.0",
     "@typescript-eslint/parser": "^6.0.0",
     "eslint": "^8.50.0",
     "eslint-config-google": "^0.14.0",
     "typescript": "^5.2.0"
   },
-  "private": true
+  "private": true,
+  "twilio": "^3.x.x"
 }
